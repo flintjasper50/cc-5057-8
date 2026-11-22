@@ -1,0 +1,21 @@
+{
+  "name": "spawnwright",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spawn-position design workbench for networked encounter zones",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "verify": "node scripts/verify.js"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1",
+    "vite": "^7.1.0"
+  }
+}

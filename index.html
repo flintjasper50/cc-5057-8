@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spawnwright — Encounter Spawn Design Workbench</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark">◈</span>
+          <span class="name">Spawnwright</span>
+          <span class="tag">encounter spawn-design workbench</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="scene-hash" class="chip mono" title="Scene hash">—</span>
+          <span id="revision" class="chip mono" title="Scene revision">rev —</span>
+          <button id="btn-help" class="mini" title="How to start (?)">How to start</button>
+          <button id="btn-run" class="primary">Run design</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="rail rail-left">
+          <section class="panel">
+            <h2>1 · Scene</h2>
+            <div id="scene-list" class="scene-list"></div>
+            <p id="scene-blurb" class="muted small"></p>
+          </section>
+
+          <section class="panel">
+            <h2>2 · Mode</h2>
+            <div class="segmented" role="tablist">
+              <button data-mode="fair" class="seg active" role="tab">Fair opening</button>
+              <button data-mode="chase" class="seg" role="tab">Asymmetric chase</button>
+            </div>
+            <p id="mode-help" class="muted small"></p>
+          </section>
+
+          <section class="panel" id="conditions">
+            <h2>3 · Spawn conditions</h2>
+            <div class="field">
+              <label for="candPerZone">Candidates per zone <output id="o-candPerZone"></output></label>
+              <input id="candPerZone" type="range" min="2" max="10" step="1" />
+            </div>
+            <div class="field">
+              <label for="minClearance">Min initial clearance (m) <output id="o-minClearance"></output></label>
+              <input id="minClearance" type="range" min="0.4" max="2.5" step="0.1" />
+            </div>
+            <div class="field">
+              <label for="minPairSep">Min pair separation (m) <output id="o-minPairSep"></output></label>
+              <input id="minPairSep" type="range" min="2" max="30" step="1" />
+            </div>
+            <div class="field fair-only">
+              <label for="maxDelta">Fair max cost delta (s) <output id="o-maxDelta"></output></label>
+              <input id="maxDelta" type="range" min="0.1" max="3" step="0.05" />
+            </div>
+            <div class="field fair-only">
+              <label class="check"><input id="rejectOneWay" type="checkbox" /> Reject one-way advantage</label>
+            </div>
+            <div class="field fair-only">
+              <label class="check"><input id="rejectSightline" type="checkbox" /> Reject head-on sightline</label>
+            </div>
+            <div class="field chase-only">
+              <label for="leadSeconds">Lead time (s) <output id="o-leadSeconds"></output></label>
+              <input id="leadSeconds" type="range" min="0" max="12" step="0.25" />
+            </div>
+            <div class="field chase-only">
+              <label for="leadTol">Lead tolerance (±s) <output id="o-leadTol"></output></label>
+              <input id="leadTol" type="range" min="0.1" max="5" step="0.1" />
+            </div>
+            <div class="field chase-only">
+              <label for="pursuitVis">Pursuer sight minimum (%) <output id="o-pursuitVis"></output></label>
+              <input id="pursuitVis" type="range" min="0" max="1" step="0.05" />
+            </div>
+            <div class="weight-block">
+              <h3>Soft weights <span class="muted small">(ranking only)</span></h3>
+              <div class="field"><label for="wParity">Approach parity <output id="o-wParity"></output></label><input id="wParity" type="range" min="0" max="2" step="0.1" /></div>
+              <div class="field"><label for="wConceal">Mutual concealment <output id="o-wConceal"></output></label><input id="wConceal" type="range" min="0" max="2" step="0.1" /></div>
+              <div class="field"><label for="wClearance">Clearance <output id="o-wClearance"></output></label><input id="wClearance" type="range" min="0" max="2" step="0.1" /></div>
+              <div class="field"><label for="wExposure">Route cover <output id="o-wExposure"></output></label><input id="wExposure" type="range" min="0" max="2" step="0.1" /></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>4 · Geometry edits</h2>
+            <div id="door-controls" class="door-controls"></div>
+            <p class="muted small">Flipping a door bumps the scene revision. Results are revoked until you re-run.</p>
+          </section>
+        </aside>
+
+        <section class="stage">
+          <div id="viewport"></div>
+          <div class="stage-overlay">
+            <div class="view-buttons">
+              <button id="view-persp" class="mini active">3D</button>
+              <button id="view-top" class="mini">Top-down</button>
+              <button id="view-reset" class="mini">Reset</button>
+            </div>
+            <div id="stage-status" class="stage-status mono"></div>
+          </div>
+          <div class="legend">
+            <span><i class="dot cand"></i>candidate</span>
+            <span><i class="dot pair-a"></i>side A</span>
+            <span><i class="dot pair-b"></i>side B</span>
+            <span><i class="dot rejected"></i>rejected</span>
+            <span><i class="line sight"></i>sightline</span>
+            <span><i class="line blocked"></i>blocked sight</span>
+          </div>
+          <div id="replay-bar" class="replay-bar hidden">
+            <button id="btn-play" class="primary small">Play</button>
+            <button id="btn-step" class="mini">Step</button>
+            <input id="replay-scrub" type="range" min="0" max="1" step="0.001" value="0" />
+            <span id="replay-time" class="mono">0.00s</span>
+          </div>
+        </section>
+
+        <aside class="rail rail-right">
+          <section class="panel">
+            <h2>Result</h2>
+            <div id="run-status" class="run-status">Press <b>Run design</b> to generate candidates.</div>
+            <div id="suggestions" class="suggestions"></div>
+            <div id="pair-list" class="pair-list"></div>
+          </section>
+          <section class="panel" id="detail-panel">
+            <h2>Selected pair</h2>
+            <div id="pair-detail" class="pair-detail muted">No pair selected.</div>
+          </section>
+          <section class="panel">
+            <h2>Rejected &amp; evidence</h2>
+            <div id="rejected-panel" class="rejected-panel muted">Run a design to inspect rejected positions.</div>
+          </section>
+          <section class="panel">
+            <h2>Flip counterfactual</h2>
+            <div id="counterfactuals" class="rejected-panel muted">Run a design to see which side inherits the lead if a one-way door is flipped.</div>
+          </section>
+          <section class="panel">
+            <h2>Scene log</h2>
+            <div id="scene-log" class="scene-log mono small"></div>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <span id="status-left">Ready.</span>
+        <span id="status-right" class="mono"></span>
+      </footer>
+    </div>
+
+    <div id="help-modal" class="modal hidden">
+      <div class="modal-body">
+        <h2>How to start the workbench</h2>
+        <p>From the project root run <code>npm install</code> then <code>npm run dev</code>, and open the printed URL (default <code>http://localhost:5173</code>). Use <code>npm test</code> for the headless kernel checks and <code>npm run verify</code> for the browser-driven verification.</p>
+        <h3>What the window does</h3>
+        <ol>
+          <li>Pick a scene (symmetric, one-way gate, elevation split).</li>
+          <li>Choose Fair opening or Asymmetric chase.</li>
+          <li>Adjust spawn conditions and soft weights. Hard limits are labelled separately.</li>
+          <li>Run design. Candidates appear in the level; the result rail lists pairs, scores, rejections and the raw geometry/nav queries behind each score.</li>
+          <li>Select a pair, then Play replay to dispatch both characters along their real routes.</li>
+          <li>Flip a one-way door and re-run to watch the advantage change sides; stale results are revoked first.</li>
+        </ol>
+        <button id="close-help" class="primary">Got it</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
