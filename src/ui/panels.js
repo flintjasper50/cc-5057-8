@@ -1,3 +1,5 @@
+import { describeOutcome } from '../core/engine.js';
+
 export function renderPairList(el, plan, selectedId, onSelect) {
   el.innerHTML = '';
   if (!plan?.ok) return;
@@ -103,6 +105,11 @@ export function renderPairDetail(el, plan, pair, options = {}) {  if (!pair) {
       <span>one-way owner: <b>${pair.advantage.oneWayAdvantageOwner ?? 'none'}</b></span>
       <span>leader: <b>${pair.advantage.leader ?? '—'}</b></span>
     </div>
+    <div class="pmeta" style="margin-top:6px">
+      <span>mutual sight: <b>${pair.mutualVisibility ? 'visible' : 'hidden'}</b></span>
+      <span>A route seen: <b>${Math.round((pair.visibility?.exposureA ?? 0) * 100)}%</b></span>
+      <span>B route seen: <b>${Math.round((pair.visibility?.exposureB ?? 0) * 100)}%</b></span>
+    </div>
     ${conflicts}
     <h3>Soft score components <span class="muted small">(ranking only, not a fairness proof)</span></h3>
     ${components}
@@ -164,8 +171,64 @@ export function renderRunStatus(el, plan, store) {
     el.innerHTML = `<span class="ok">${pairCount} candidate pair${pairCount === 1 ? '' : 's'}</span> for ${escapeHtml(plan.mode)} mode. ${rej} pair(s) rejected. <br><span class="muted small">${escapeHtml(zones)}</span>`;
   } else {
     el.innerHTML = `<span class="bad">No usable pair</span> in ${escapeHtml(plan.mode)} mode. ${rej} pair(s) rejected.`
-      + (plan.code ? `<br><span class="muted small">${escapeHtml(plan.code)}: ${escapeHtml(plan.message ?? '')}</span>` : '');
+      + (plan.code ? `<br><span class="muted small">${escapeHtml(plan.code)}: ${escapeHtml(plan.message ?? '')}</span>` : '')
+      + `<br><span class="muted small">${escapeHtml(zones)}</span>`;
   }
+}
+
+// The outcome banner separates "no candidate positions exist" from "candidates
+// exist but no pair satisfies the limits", because the two need different fixes.
+export function renderOutcome(el, plan) {
+  if (!plan) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  const info = describeOutcome(plan);
+  const cls = info.outcome === 'success' ? 'ok' : info.outcome === 'constraints-conflict' ? 'warn' : 'bad';
+  el.className = `outcome-banner ${cls}`;
+  el.innerHTML = `<div class="ob-head"><span class="ob-code mono">${escapeHtml(info.label)}</span></div>
+    <div class="ob-sum">${escapeHtml(info.summary)}</div>
+    <div class="ob-next muted small">${escapeHtml(info.next)}</div>`;
+}
+
+// Compare the candidate region (where spawns were sampled) with the actual
+// encounter (where the two characters really are along the replay). This is
+// computed from the plan/replay records, not drawn by hand.
+export function renderEncounter(el, plan, pair, replay) {
+  if (!plan?.ok || !pair) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.remove('hidden');
+  const zrA = plan.zoneReports.find((z) => z.zoneId === pair.zones[0]);
+  const zrB = plan.zoneReports.find((z) => z.zoneId === pair.zones[1]);
+  const regionA = zrA ? `${zrA.accepted} candidates in ${zrA.poolSize} samples` : '—';
+  const regionB = zrB ? `${zrB.accepted} candidates in ${zrB.poolSize} samples` : '—';
+
+  const firstVis = replay?.firstVisibility;
+  const visLine = firstVis
+    ? 'first mutual sight at ' + fmt(firstVis.t) + 's'
+    : replay ? 'no mutual sight sampled along the routes' : 'play the replay to record the encounter';
+
+  const sides = replay ? ['A', 'B'].map((side) => {
+    const s = replay.sides[side];
+    return `<div class="enc-row"><b>${side}</b> arrives ${fmt(s.arrivalTime)}s${s.connectors?.length ? ` via ${escapeHtml(s.connectors.join(','))}` : ''}${s.doors?.length ? ` · ${s.doors.length} door` : ''}</div>`;
+  }).join('') : `<div class="enc-row">planned: A ${fmt(pair.metrics.costA)}s · B ${fmt(pair.metrics.costB)}s</div>`;
+
+  const exposure = `A route seen ${Math.round((pair.visibility?.exposureA ?? 0) * 100)}% · B route seen ${Math.round((pair.visibility?.exposureB ?? 0) * 100)}%`;
+  const sight = pair.mutualVisibility ? 'spawns see each other' : 'spawns are hidden from each other';
+
+  el.innerHTML = `
+    <h3>Actual encounter</h3>
+    <div class="enc-grid">
+      <div class="enc-col"><div class="enc-cap">Candidate region</div><div class="enc-body">A: ${escapeHtml(regionA)}<br>B: ${escapeHtml(regionB)}</div></div>
+      <div class="enc-col"><div class="enc-cap">Encounter</div><div class="enc-body">${visLine}</div></div>
+    </div>
+    ${sides}
+    <div class="muted small" style="margin-top:4px">${escapeHtml(sight)} · ${escapeHtml(exposure)}</div>
+  `;
 }
 
 export function renderRejected(el, plan, state) {

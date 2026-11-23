@@ -1,12 +1,14 @@
 import './styles.css';
-import { createScene, sceneHash, flipDoor, doorSolids, cloneScene, floorById, activityClearance } from './core/scene.js';
+import { createScene, sceneHash, flipDoor, doorSolids, cloneScene, floorById, activityClearance, resizeZone } from './core/scene.js';
 import { builtinScenes } from './core/levels.js';
-import { planSpawns, replayPair, DEFAULT_CONFIG, resolveConfig } from './core/engine.js';
+import { planSpawns, replayPair, DEFAULT_CONFIG, resolveConfig, describeOutcome, reweightRejections } from './core/engine.js';
+import { WEIGHT_APPLICABILITY } from './core/metrics.js';
 import { EvidenceStore } from './core/evidence.js';
 import { Viewport } from './ui/viewport.js';
 import {
   renderPairList, renderPairDetail, renderSuggestions, renderRunStatus,
   renderRejected, renderCounterfactuals, renderLog, renderSceneLogStatus,
+  renderOutcome, renderEncounter,
 } from './ui/panels.js';
 
 const state = {
@@ -45,6 +47,10 @@ const el = {
   replayTime: document.getElementById('replay-time'),
   counterfactuals: document.getElementById('counterfactuals'),
   help: document.getElementById('help-modal'),
+  outcomeBanner: document.getElementById('outcome-banner'),
+  zoneControls: document.getElementById('zone-controls'),
+  encounterPanel: document.getElementById('encounter-panel'),
+  weightHelp: document.getElementById('weight-help'),
 };
 
 const viewport = new Viewport(el.viewport);
@@ -66,6 +72,7 @@ function loadScene(index, { keepMode = true } = {}) {
   syncSceneChrome();
   renderSceneList();
   renderDoorControls();
+  renderZoneControls();
   resetResultPanels();
   document.body.dataset.mode = state.mode;
   syncModeUI();
@@ -122,6 +129,72 @@ function renderDoorControls() {
   }
 }
 
+// Editable spawn-zone extents. Changing an edge is a real geometry edit: it
+// re-runs the design against the new rect, so the candidate region shown on
+// stage and the pairs in the rail both come from the live computation.
+function renderZoneControls() {
+  el.zoneControls.innerHTML = '';
+  const spawns = state.scene.zones.filter((z) => z.kind === 'spawn');
+  if (!spawns.length) {
+    el.zoneControls.innerHTML = '<div class="muted small">This scene has no spawn zones to edit.</div>';
+    return;
+  }
+  for (const zone of spawns) {
+    const card = document.createElement('div');
+    card.className = 'zone-card';
+    const floor = floorById(state.scene, zone.floor);
+    card.innerHTML = `<div class="zc-head"><span class="zn">${escapeHtml(zone.name ?? zone.id)}</span><span class="muted small mono">${escapeHtml(zone.floor)} · y ${floor?.y ?? 0}</span></div>`;
+    const grid = document.createElement('div');
+    grid.className = 'zone-grid';
+    for (const edge of ['min-x', 'max-x', 'min-z', 'max-z']) {
+      const axis = edge.endsWith('x') ? 0 : 1;
+      const key = edge.startsWith('min') ? 'min' : 'max';
+      const wrap = document.createElement('label');
+      wrap.className = 'zone-field';
+      wrap.innerHTML = `<span>${edge}</span>`;
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = '0.5';
+      input.value = String(round1(zone.rect[key][axis]));
+      input.dataset.zoneId = zone.id;
+      input.dataset.edge = edge;
+      input.title = `Move the ${edge} edge of ${zone.id}`;
+      input.addEventListener('change', () => {
+        const v = Number(input.value);
+        applyZoneEdit(zone.id, edge, v);
+      });
+      wrap.appendChild(input);
+      grid.appendChild(wrap);
+    }
+    card.appendChild(grid);
+    el.zoneControls.appendChild(card);
+  }
+}
+
+function applyZoneEdit(zoneId, edge, value) {
+  try {
+    state.scene = resizeZone(state.scene, zoneId, edge, value);
+  } catch (err) {
+    setStatus(`Zone edit failed: ${err.message}`);
+    renderZoneControls();
+    return;
+  }
+  state.plan = null;
+  state.selectedPairId = null;
+  state.replay = null;
+  viewport.buildScene(state.scene);
+  syncSceneChrome();
+  renderZoneControls();
+  renderDoorControls();
+  resetResultPanels();
+  state.store.revokeAll(`spawn zone ${zoneId} ${edge} edited, revision ${state.scene.revision}`);
+  renderLog(el.log, state.store);
+  renderSceneLogStatus(el.statusRight, state.store);
+  setStatus(`Adjusted ${zoneId} (${edge} → ${round1(value)}). Revision ${state.scene.revision}. Re-running on the live geometry…`);
+  // Run against the edited geometry so the stage and the rail always agree.
+  runDesign();
+}
+
 function flipDoorInScene(id) {
   state.scene = flipDoor(state.scene, id);
   state.plan = null;
@@ -156,6 +229,14 @@ function syncModeUI() {
   el.modeHelp.textContent = state.mode === 'fair'
     ? 'Both sides are run once. One-way advantages are detected with a door-neutral control and rejected. Pairs must land within the cost delta.'
     : 'One side is intended to lead. The lead is compared against the configured window, and the fair-mode reading is still reported alongside.';
+  if (el.weightHelp) {
+    const active = WEIGHT_APPLICABILITY.perMode[state.mode] ?? [];
+    el.weightHelp.textContent = `These weights only order pairs that already passed every hard limit. Active in ${state.mode} mode: ${active.join(', ')}. They cannot accept, reject, or prove fairness for any gameplay mode.`;
+  }
+}
+
+function round1(x) {
+  return Math.round(x * 10) / 10;
 }
 
 // ---- controls ------------------------------------------------------------
@@ -224,7 +305,7 @@ function runDesign() {
       const dt = performance.now() - t0;
       setStatus(plan.ok
         ? `Design complete in ${dt.toFixed(0)}ms — ${plan.pairs.length} pair(s), ${plan.pairRejections.length} rejected.`
-        : `No usable pair in ${dt.toFixed(0)}ms — see the suggestions in the result rail.`);
+        : `No usable pair in ${dt.toFixed(0)}ms — ${describeOutcome(plan).label}. See the result rail.`);
       el.stageStatus.textContent = sceneHash(state.scene);
     } catch (err) {
       console.error(err);
@@ -239,6 +320,7 @@ function runDesign() {
 function renderResults() {
   const plan = state.plan;
   renderRunStatus(el.runStatus, plan, state.store);
+  renderOutcome(el.outcomeBanner, plan);
   renderSuggestions(el.suggestions, plan);
   renderPairList(el.pairList, plan, state.selectedPairId, selectPair);
   renderRejectedPanel();
@@ -246,11 +328,14 @@ function renderResults() {
   if (plan?.ok) {
     const pair = plan.pairs.find((p) => p.id === state.selectedPairId);
     renderPairDetail(el.pairDetail, plan, pair, { replay: state.replay });
+    renderEncounter(el.encounterPanel, plan, pair, state.replay);
     el.replayBar.classList.remove('hidden');
     setStatus(`Selected ${pair.id}. Play the replay to dispatch both characters.`);
   } else {
     el.pairDetail.className = 'pair-detail muted';
     el.pairDetail.textContent = 'No pair to inspect. Read the suggestions, adjust conditions, or switch mode.';
+    el.encounterPanel.classList.add('hidden');
+    el.encounterPanel.innerHTML = '';
     el.replayBar.classList.add('hidden');
   }
 }
@@ -274,16 +359,20 @@ function selectPair(id) {
   viewport.focusPair(pair);
   state.replay = null;
   renderPairDetail(el.pairDetail, state.plan, pair, { replay: null });
+  renderEncounter(el.encounterPanel, state.plan, pair, null);
   el.replayBar.classList.remove('hidden');
   el.replayScrub.value = '0';
 }
 
 function resetResultPanels() {
   renderRunStatus(el.runStatus, null, state.store);
+  renderOutcome(el.outcomeBanner, null);
   renderSuggestions(el.suggestions, null);
   el.pairList.innerHTML = '';
   el.pairDetail.className = 'pair-detail muted';
   el.pairDetail.textContent = 'No pair selected.';
+  el.encounterPanel.classList.add('hidden');
+  el.encounterPanel.innerHTML = '';
   renderRejected(el.rejected, null, state);
   el.replayBar.classList.add('hidden');
   el.stageStatus.textContent = sceneHash(state.scene);
@@ -304,6 +393,8 @@ function ensureReplay() {
   renderSceneLogStatus(el.statusRight, state.store);
   const pair = state.plan.pairs.find((p) => p.id === state.selectedPairId);
   renderPairDetail(el.pairDetail, state.plan, pair, { replay });
+  renderEncounter(el.encounterPanel, state.plan, pair, replay);
+  viewport.showEncounter(replay);
   el.replayScrub.max = String(replay.sides.A.arrivalTime ?? 1);
   return replay;
 }
@@ -419,6 +510,7 @@ window.__spawnwright = {
   playReplay,
   loadScene,
   flipDoor: flipDoorInScene,
+  editZone: applyZoneEdit,
   setMode,
   viewport,
 };

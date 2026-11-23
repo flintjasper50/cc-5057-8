@@ -4,6 +4,7 @@ import {
 } from './scene.js';
 import { getNavGraph } from './nav.js';
 import { generateCandidates, pairEvidence, routeExposure } from './candidates.js';
+import { pursuerExposure, WEIGHT_APPLICABILITY, METRIC_DEFINITIONS } from './metrics.js';
 import { round, hashString } from './math.js';
 
 export const DEFAULT_CONFIG = {
@@ -59,25 +60,24 @@ export function planSpawns(scene, partialConfig = {}) {
   const primaryObjective = objectives[0] ?? null;
 
   if (spawns.length < 2) {
-    return failure(scene, config, 'need-two-spawn-zones',
+    return failure(scene, config, 'invalid-scene', 'need-two-spawn-zones',
       `Fair/chase pairing needs at least two spawn zones; found ${spawns.length}.`);
   }
   if (!primaryObjective) {
-    return failure(scene, config, 'no-objective', 'No objective zone is defined.');
+    return failure(scene, config, 'invalid-scene', 'no-objective', 'No objective zone is defined.');
   }
 
+  // Distinguish "the level cannot present candidates at all" from "candidates
+  // exist but no pair satisfies the hard limits". These are different problems
+  // for the author and must not be reported with one generic failure.
   const candidateSets = [];
   const zoneReports = [];
   for (const zone of spawns) {
     const gen = generateCandidates(scene, config, zone);
-    if (!gen.picked.length) {
-      return failure(scene, config, 'no-candidates',
-        `Spawn zone "${zone.id}" produced no geometrically valid candidate positions.`,
-        { zoneId: zone.id, rejected: gen.rejected });
-    }
     candidateSets.push({ zone, ...gen });
     zoneReports.push({
       zoneId: zone.id,
+      floorId: zone.floor,
       poolSize: gen.poolSize,
       accepted: gen.picked.length,
       rejected: gen.rejected.length,
@@ -86,10 +86,20 @@ export function planSpawns(scene, partialConfig = {}) {
       candidatesRaw: { rejected: gen.rejected },
     });
   }
+  const emptyZones = zoneReports.filter((z) => z.accepted === 0);
+  if (emptyZones.length) {
+    return failure(scene, config, 'no-candidates', 'no-candidates',
+      `Spawn zone(s) ${emptyZones.map((z) => `"${z.zoneId}"`).join(', ')} produced no geometrically valid candidate positions.`,
+      { zoneReports, emptyZones: emptyZones.map((z) => z.zoneId) });
+  }
 
   const { pairs, pairRejections } = buildPairs(scene, nav, config, candidateSets, objectives, primaryObjective);
   const ranked = rankPairs(scene, config, pairs, primaryObjective);
   const top = ranked.slice(0, config.maxPairs);
+  // Every pair that satisfied the hard limits, before diversity pruning and
+  // truncation. The surfaced `pairs` list is a ranked subset of this; weights
+  // may reorder or prune here, but must never move a pair in or out of it.
+  const acceptedPool = pairs.map((p) => p.id).sort();
 
   // Chase mode still reports a "mirror" reading so the author can see whether
   // the authored geometry would be fair under the stricter rule.
@@ -101,9 +111,18 @@ export function planSpawns(scene, partialConfig = {}) {
       ? 'No accepted pair to compare against a door flip. Resolve the rejections above, then flip a gate to see the lead move.'
       : 'No one-way doors in this scene.';
 
+  // Outcome is the machine-readable answer to "why is there no pair?". Only
+  // `constraints-conflict` is fixed by changing limits; `no-candidates` is
+  // fixed by changing geometry.
+  let outcome;
+  if (top.length) outcome = 'success';
+  else if (emptyZones.length) outcome = 'no-candidates';
+  else outcome = 'constraints-conflict';
+
   return {
     ok: top.length > 0,
     kind: 'plan',
+    outcome,
     sceneId: scene.id,
     sceneHash: hash,
     revision: scene.revision,
@@ -112,19 +131,30 @@ export function planSpawns(scene, partialConfig = {}) {
     objective: { id: primaryObjective.id, name: primaryObjective.name, center: zoneCenter(primaryObjective) },
     zoneReports,
     pairs: top,
+    acceptedPool,
     pairRejections,
     fairCheck,
     counterfactuals,
     counterfactualsUnavailable,
     suggestions,
+    weightApplicability: WEIGHT_APPLICABILITY,
+    metricDefinitions: METRIC_DEFINITIONS,
     generatedAt: new Date().toISOString(),
   };
 }
 
-function failure(scene, config, code, message, extra = {}) {
+function failure(scene, config, outcome, code, message, extra = {}) {
   return {
-    ok: false, kind: 'plan', sceneId: scene.id, sceneHash: sceneHash(scene),
-    revision: scene.revision, mode: config.mode, config, code, message, ...extra,
+    ok: false, kind: 'plan', outcome, code,
+    sceneId: scene.id, sceneHash: sceneHash(scene),
+    revision: scene.revision, mode: config.mode, config, message,
+    // Failure plans carry empty pair/zone collections so every consumer can
+    // read them uniformly; `outcome` and `zoneReports` still distinguish
+    // "no candidate positions" from "candidates exist but no pair is legal".
+    pairs: [], pairRejections: [], counterfactuals: [], zoneReports: [],
+    ...extra,
+    weightApplicability: WEIGHT_APPLICABILITY,
+    metricDefinitions: METRIC_DEFINITIONS,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -300,20 +330,51 @@ function evaluatePair(scene, nav, config, a, b, zoneA, zoneB, objectives) {
         detail: `lead ${round(lead, 2)}s outside [${round(lo, 2)}, ${round(hi, 2)}]s window`,
       });
     }
-    if (ev.exposure.fraction < config.chase.minPursuitVisibility) {
+    // Pursuit is directional: the slower side is the pursuer, and it must be
+    // able to see the prey's route from its own spawn. Using the prey's route
+    // seen from the pursuer (not an averaged exposure) is what the limit says.
+    const pursuit = pursuerExposure(costA, costB, ev.exposure.a.fraction, ev.exposure.b.fraction);
+    if (pursuit.fraction < config.chase.minPursuitVisibility) {
       rejectReasons.push({
         code: 'pursuer-cannot-find',
-        detail: `only ${round(ev.exposure.fraction * 100, 0)}% of pursuer route sees the prey (< ${round(config.chase.minPursuitVisibility * 100, 0)}%)`,
+        detail: `pursuer ${pursuit.pursuer ?? '—'} sees only ${round(pursuit.fraction * 100, 0)}% of prey ${pursuit.prey ?? '—'}'s route (< ${round(config.chase.minPursuitVisibility * 100, 0)}%)`,
       });
     }
   }
 
   if (rejectReasons.length) {
+    // Rejections retain their measured inputs and a soft-score snapshot. The
+    // snapshot is not a verdict (the pair stays rejected); it lets the author
+    // see how a different weighting would have ranked the same spawn points
+    // via `reweightRejections` without re-running geometry or navigation.
     return {
       rejected: true,
       reasons: rejectReasons,
-      metrics: { costA, costB, delta, rel, separation: round(sep, 3), leadSeconds: Number.isFinite(delta) ? round(delta, 3) : null },
+      points: { A: a.pos, B: b.pos },
+      a: a.id,
+      b: b.id,
+      zones: [zoneA.id, zoneB.id],
+      floors: [a.floorId, b.floorId],
+      metrics: {
+        costA: round(costA, 3), costB: round(costB, 3),
+        delta: Number.isFinite(delta) ? round(delta, 3) : null,
+        relativeDelta: Number.isFinite(rel) ? round(rel, 4) : null,
+        separation: round(sep, 3),
+        leadSeconds: Number.isFinite(delta) ? round(delta, 3) : null,
+        clearanceA: a.clearance.radius, clearanceB: b.clearance.radius,
+        ascentA: routeA.ascent, ascentB: routeB.ascent,
+      },
+      scores: scorePair(scene, config, a, b, ev, delta, rel, sep),
+      advantage: { cheaperSide: cheaper, leader: null, oneWay: doorAdvantage, oneWayAdvantageOwner: doorAdvantage.owner },
+      mutualVisibility: ev.sight.visible,
+      visibility: {
+        sight: { visible: ev.sight.visible, blockedBy: ev.sight.blockedBy, distance: ev.sight.distance },
+        exposureA: round(ev.exposure.a.fraction, 3),
+        exposureB: round(ev.exposure.b.fraction, 3),
+      },
       evidence: ev.records,
+      conflicts: ev.conflict ? [{ code: 'sight-vs-route', detail: 'spawn-level sightline and route sampling disagree; both records retained' }] : [],
+      candidates: [a, b],
     };
   }
 
@@ -349,7 +410,8 @@ function evaluatePair(scene, nav, config, a, b, zoneA, zoneB, objectives) {
     mutualVisibility: ev.sight.visible,
     visibility: {
       sight: { visible: ev.sight.visible, blockedBy: ev.sight.blockedBy, distance: ev.sight.distance },
-      exposureA: round(ev.exposure.fraction, 3),
+      exposureA: round(ev.exposure.a.fraction, 3),
+      exposureB: round(ev.exposure.b.fraction, 3),
     },
     evidence: ev.records,
     doorEvidence: doorAdvantage.doorId ? [{
@@ -445,7 +507,7 @@ function scorePair(scene, config, a, b, ev, delta, rel, sep) {
 
   const conceal = clamp01(ev.sight.visible ? 0 : 1);
   components.push({ key: 'concealment', label: 'Mutual concealment', weight: w.concealment, raw: ev.sight.visible, score: round(conceal, 3), note: ev.sight.visible ? `visible over ${ev.sight.distance}m` : `hidden by ${ev.sight.blockedBy}` });
-  components.push({ key: 'routeExposure', label: 'Route cover', weight: w.routeExposure, raw: round(ev.exposure.fraction, 3), score: round(clamp01(1 - ev.exposure.fraction), 3), note: `${Math.round(ev.exposure.fraction * 100)}% of route sampled in view of opponent spawn` });
+  components.push({ key: 'routeExposure', label: 'Route cover', weight: w.routeExposure, raw: round((ev.exposure.a.fraction + ev.exposure.b.fraction) / 2, 3), score: round(clamp01(1 - (ev.exposure.a.fraction + ev.exposure.b.fraction) / 2), 3), note: `A route ${Math.round(ev.exposure.a.fraction * 100)}% / B route ${Math.round(ev.exposure.b.fraction * 100)}% sampled in view of the opposing spawn` });
   const spread = clamp01(sep / Math.max(1e-6, config.limits.maxPairSeparation));
   components.push({ key: 'spatialSpread', label: 'Approach separation', weight: w.spatialSpread, raw: round(sep, 3), score: round(spread, 3), note: 'wider separation / max pair separation' });
 
@@ -569,6 +631,84 @@ function summarizeMoved(perPair) {
   const moved = perPair.filter((p) => p.moved);
   if (!moved.length) return 'unchanged';
   return moved.map((p) => `${p.pairId}: ${p.previousLeader} → ${p.leader}`).join('; ');
+}
+
+// Recompute the soft ranking of already-measured rejected pairs under a new set
+// of weights. This does NOT flip any rejection: the hard limits are unchanged,
+// so the pairs stay rejected. It only answers "how would a different weighting
+// have ranked these same spawn points?", which is exactly what the score is
+// allowed to do. No geometry, navigation, or sightline query is re-run.
+export function reweightRejections(plan, weights) {
+  if (!plan?.pairRejections?.length) return [];
+  const merged = { ...(plan.config?.weights ?? {}), ...weights };
+  return plan.pairRejections
+    .filter((r) => r.scores && r.metrics)
+    .map((r) => {
+      const rescored = rescoreSnapshot(r, merged, plan.mode ?? plan.config?.mode);
+      return {
+        a: r.a, b: r.b,
+        codes: [...new Set(r.reasons.map((x) => x.code))],
+        metrics: r.metrics,
+        previousNormalized: r.scores.normalized,
+        normalized: rescored.normalized,
+        components: rescored.components,
+      };
+    })
+    .sort((x, y) => y.normalized - x.normalized);
+}
+
+// Re-score one measured snapshot. The component *scores* are inputs that came
+// from geometry/nav; only the weights and therefore the total are new.
+function rescoreSnapshot(record, weights, mode) {
+  const snapshot = record.scores;
+  const components = snapshot.components.map((c) => ({ ...c }));
+  for (const c of components) {
+    const key = componentWeightKey(c.key);
+    if (key && weights[key] !== undefined) c.weight = weights[key];
+  }
+  const total = components.reduce((s, c) => s + c.weight * c.score, 0);
+  const weightSum = components.reduce((s, c) => s + c.weight, 0);
+  return { components, weighted: round(total, 4), normalized: round(weightSum ? total / weightSum : 0, 4) };
+}
+
+function componentWeightKey(key) {
+  return {
+    clearance: 'clearance',
+    approachParity: 'approachParity',
+    leadWindow: 'leadWindow',
+    concealment: 'concealment',
+    routeExposure: 'routeExposure',
+    spatialSpread: 'spatialSpread',
+  }[key] ?? null;
+}
+
+const OUTCOME_TEXT = {
+  success: {
+    label: 'accepted pairs',
+    summary: 'At least one pair satisfies every hard limit.',
+    next: 'Select a pair and play the replay to check arrival evidence.',
+  },
+  'no-candidates': {
+    label: 'no candidate positions',
+    summary: 'A spawn zone produced no geometrically valid positions, so pairing never started.',
+    next: 'The fix is geometry, not a limit: enlarge the zone, clear obstacles, or lower the minimum clearance.',
+  },
+  'constraints-conflict': {
+    label: 'no pair satisfies the hard limits',
+    summary: 'Candidates exist in every zone, but every pair violates at least one hard limit or mode rule.',
+    next: 'The fix is the limits or the mode: read the named rejection codes, then adjust the matching condition.',
+  },
+  'invalid-scene': {
+    label: 'scene cannot be planned',
+    summary: 'The scene is missing spawn zones or an objective.',
+    next: 'Add the missing zones before running a design.',
+  },
+};
+
+export function describeOutcome(plan) {
+  if (!plan) return null;
+  const base = OUTCOME_TEXT[plan.outcome] ?? OUTCOME_TEXT['invalid-scene'];
+  return { outcome: plan.outcome ?? (plan.ok ? 'success' : 'constraints-conflict'), ...base };
 }
 export function replayPair(scene, plan, pairId, options = {}) {
   const config = resolveConfig(plan.config ?? {});

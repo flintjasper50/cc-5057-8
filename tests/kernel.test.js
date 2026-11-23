@@ -8,9 +8,11 @@ import {
 } from '../src/core/scene.js';
 import { segmentIntersection2, segmentRectInterval2, segmentAabbInterval3, mulberry32 } from '../src/core/math.js';
 import { getNavGraph, clearNavCache } from '../src/core/nav.js';
-import { planSpawns, replayPair, resolveConfig } from '../src/core/engine.js';
+import { planSpawns, replayPair, resolveConfig, reweightRejections, describeOutcome } from '../src/core/engine.js';
 import { generateCandidates, pairEvidence } from '../src/core/candidates.js';
 import { EvidenceStore } from '../src/core/evidence.js';
+import { checkPlan, checkScene } from '../src/core/contract.js';
+import { pairExposure, pursuerExposure, routeExposure, WEIGHT_APPLICABILITY } from '../src/core/metrics.js';
 import { symmetricArena, oneWayChase, elevationSplit } from '../src/core/levels.js';
 
 const scene = (raw) => createScene(JSON.parse(JSON.stringify(raw)));
@@ -305,4 +307,146 @@ test('no objective or too few zones yields a failure with a code', () => {
   const plan = planSpawns(s, { mode: 'fair' });
   assert.equal(plan.ok, false);
   assert.equal(plan.code, 'need-two-spawn-zones');
+  assert.equal(plan.outcome, 'invalid-scene');
+  assert.equal(describeOutcome(plan).outcome, 'invalid-scene');
+});
+
+test('outcome distinguishes no-candidates from constraints-conflict', () => {
+  clearNavCache();
+  const s = scene(symmetricArena);
+  // Shrink each spawn rect below the 2*inset minimum so no position samples.
+  s.zones = s.zones.map((z) => (z.kind === 'spawn'
+    ? { ...z, rect: { min: [z.rect.min[0], z.rect.min[1]], max: [z.rect.min[0] + 0.5, z.rect.min[1] + 0.5] } }
+    : z));
+  const noCand = planSpawns(s, { mode: 'fair' });
+  assert.equal(noCand.outcome, 'no-candidates');
+  assert.deepEqual(noCand.emptyZones, ['spawn-l', 'spawn-r']);
+  assert.match(describeOutcome(noCand).next, /geometry/i);
+
+  clearNavCache();
+  const rej = planSpawns(scene(symmetricArena), { mode: 'fair', limits: { minPairSeparation: 999 } });
+  assert.equal(rej.outcome, 'constraints-conflict');
+  assert.match(describeOutcome(rej).next, /limits/i);
+});
+
+test('directional route exposure is recorded both ways and retained on conflict', () => {
+  clearNavCache();
+  const s = scene(elevationSplit);
+  const config = resolveConfig({ candidatesPerZone: 4 });
+  const la = generateCandidates(s, config, zoneById(s, 'spawn-tower'));
+  const ra = generateCandidates(s, config, zoneById(s, 'spawn-ground'));
+  let sawB = false;
+  let sawConflict = false;
+  for (const a of la.picked) {
+    for (const b of ra.picked) {
+      const ev = pairEvidence(s, a, b);
+      const dirs = ev.records.filter((r) => r.source === 'geometry:route-exposure').map((r) => r.direction);
+      assert.ok(dirs.includes('A-route-seen-from-B-spawn'));
+      assert.ok(dirs.includes('B-route-seen-from-A-spawn'));
+      sawB = true;
+      if (ev.conflict) {
+        sawConflict = true;
+        assert.equal(ev.records.filter((r) => r.source === 'geometry:route-exposure').length, 2,
+          'both directional records survive a conflict');
+      }
+    }
+  }
+  assert.ok(sawB);
+  assert.ok(sawConflict, 'elevation scene has at least one sight-vs-route conflict');
+});
+
+test('pursuer exposure selects the slower side and its own spawn view', () => {
+  const e = pursuerExposure(5, 9, 0.1, 0.8);
+  assert.equal(e.prey, 'A');
+  assert.equal(e.pursuer, 'B');
+  assert.equal(e.fraction, 0.8, 'pursuer B sees prey A route');
+  const tie = pursuerExposure(4, 4, 0.2, 0.9);
+  assert.equal(tie.pursuer, null);
+  assert.equal(tie.fraction, 0.9, 'tie uses the larger observation');
+});
+
+test('weights are declared non-gating and never change the accepted pool', () => {
+  clearNavCache();
+  const s = scene(oneWayChase);
+  const base = planSpawns(s, { mode: 'fair', maxPairs: 1e9 });
+  const perturbed = planSpawns(s, {
+    mode: 'fair', maxPairs: 1e9,
+    weights: { approachParity: 0, concealment: 3, clearance: 0, routeExposure: 3, spatialSpread: 0 },
+  });
+  assert.deepEqual(base.acceptedPool, perturbed.acceptedPool);
+  assert.equal(WEIGHT_APPLICABILITY.acceptanceGating, false);
+  assert.equal(WEIGHT_APPLICABILITY.fairnessProof, false);
+});
+
+test('reweightRejections re-scores rejected spawn points without rescuing them', () => {
+  clearNavCache();
+  const s = flipDoor(scene(oneWayChase), 'gate-north');
+  const plan = planSpawns(s, { mode: 'fair' });
+  assert.equal(plan.ok, false);
+  assert.ok(plan.pairRejections.length > 0);
+  const rescored = reweightRejections(plan, { approachParity: 2, concealment: 0, clearance: 0, routeExposure: 0, spatialSpread: 0 });
+  assert.equal(rescored.length, plan.pairRejections.length);
+  for (const r of rescored) {
+    assert.ok(Array.isArray(r.codes) && r.codes.length > 0);
+    assert.ok(Number.isFinite(r.normalized));
+    assert.ok(Number.isFinite(r.previousNormalized));
+  }
+  // The rejection decision is unchanged: re-scoring is display-only.
+  const again = planSpawns(s, { mode: 'fair', weights: { approachParity: 2, concealment: 0, clearance: 0, routeExposure: 0, spatialSpread: 0 } });
+  assert.equal(again.ok, false);
+  assert.deepEqual(again.acceptedPool, plan.acceptedPool);
+});
+
+test('plan re-weighting cannot move a pair across the hard limit', () => {
+  clearNavCache();
+  const s = scene(symmetricArena);
+  const plan = planSpawns(s, { mode: 'fair' });
+  assert.ok(plan.ok);
+  // Zero out the parity weight; pairs still must satisfy the hard delta limit.
+  const reweighted = planSpawns(s, {
+    mode: 'fair',
+    weights: { approachParity: 0, concealment: 0, clearance: 0, routeExposure: 0, spatialSpread: 0 },
+  });
+  for (const p of reweighted.pairs) {
+    assert.ok(p.metrics.delta <= reweighted.config.limits.maxPathCostDelta + 1e-9
+      || p.metrics.relativeDelta <= reweighted.config.limits.maxRelativeDelta + 1e-9);
+  }
+});
+
+test('contract accepts every built-in plan and rejects a tampered metric', () => {
+  clearNavCache();
+  for (const raw of [symmetricArena, oneWayChase, elevationSplit]) {
+    const s = scene(raw);
+    const { plan, report } = checkScene(s, { mode: 'fair' });
+    assert.ok(report.ok, `${raw.id} contract: ${report.failures.map((f) => f.name).join(',')}`);
+    if (plan.pairs.length) {
+      const tampered = JSON.parse(JSON.stringify(plan));
+      tampered.pairs[0].metrics.costA += 3;
+      const bad = checkPlan(s, tampered);
+      assert.equal(bad.ok, false);
+      assert.ok(bad.failures.some((f) => f.name.startsWith('pair-costA')));
+    }
+  }
+});
+
+test('contract rejects a forged accepted pair that violates a hard limit', () => {
+  clearNavCache();
+  const s = flipDoor(scene(oneWayChase), 'gate-north');
+  const plan = planSpawns(s, { mode: 'fair' });
+  assert.equal(plan.ok, false);
+  assert.ok(plan.pairRejections.length > 0);
+  const forged = JSON.parse(JSON.stringify(plan));
+  forged.ok = true;
+  forged.outcome = 'success';
+  forged.pairs = [{
+    id: 'forged', a: forged.pairRejections[0].a, b: forged.pairRejections[0].b,
+    zones: forged.pairRejections[0].zones, floors: forged.pairRejections[0].floors,
+    points: forged.pairRejections[0].points, metrics: forged.pairRejections[0].metrics,
+    advantage: forged.pairRejections[0].advantage, mutualVisibility: forged.pairRejections[0].mutualVisibility,
+    visibility: forged.pairRejections[0].visibility, evidence: [], doorEvidence: [], conflicts: [],
+    candidates: forged.pairRejections[0].candidates, scores: forged.pairRejections[0].scores,
+  }];
+  const report = checkPlan(s, forged);
+  assert.equal(report.ok, false);
+  assert.ok(report.failures.some((f) => f.name.startsWith('accepted-oneway-neutral') || f.name.startsWith('accepted-fair-delta')));
 });

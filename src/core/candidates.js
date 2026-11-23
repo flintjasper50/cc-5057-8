@@ -1,9 +1,10 @@
 import {
   activityClearance, floorById, zoneById, spawnZones, objectiveZones,
-  zoneCenter, floorEdgeInfo, nearestOccluder, visibilityBetween, zoneById as _z,
+  zoneCenter, floorEdgeInfo, nearestOccluder, visibilityBetween,
 } from './scene.js';
 import { getNavGraph } from './nav.js';
-import { round, mulberry32 } from './math.js';
+import { round } from './math.js';
+import { routeExposure, pairExposure, exposureConflict } from './metrics.js';
 
 // Deterministic candidate sampling inside a spawn zone. Points are walkable,
 // horizontally clear and headroom-adequate; sampling is spread with a
@@ -12,13 +13,14 @@ import { round, mulberry32 } from './math.js';
 export function generateCandidates(scene, config, zone) {
   const nav = getNavGraph(scene);
   const floor = floorById(scene, zone.floor);
-  if (!floor) return [];
+  const empty = { picked: [], rejected: [], poolSize: 0 };
+  if (!floor) return empty;
   const inset = config.spawnInset ?? 0.6;
   const rect = {
     min: [zone.rect.min[0] + inset, zone.rect.min[1] + inset],
     max: [zone.rect.max[0] - inset, zone.rect.max[1] - inset],
   };
-  if (rect.max[0] <= rect.min[0] || rect.max[1] <= rect.min[1]) return [];
+  if (rect.max[0] <= rect.min[0] || rect.max[1] <= rect.min[1]) return empty;
 
   const spacing = config.sampleSpacing ?? 1.1;
   const raw = [];
@@ -168,13 +170,16 @@ function buildCandidateEvidence(scene, floor, cand, objectives) {
   return evidence;
 }
 
-// Pairwise sightline evidence, plus route exposure. When the sightline says
-// "concealed" but route sampling says "exposed" (or the reverse) both records
-// are kept and flagged as a conflict instead of being collapsed into one score.
+// Pairwise sightline evidence, plus route exposure in BOTH directions. When the
+// sightline says "concealed" but route sampling says "exposed" (or the reverse)
+// the records are kept and flagged as a conflict instead of being collapsed
+// into one score. A→B and B→A exposure are separate records because the
+// evidence is directional: one lane can be sheltered while the other is not.
 export function pairEvidence(scene, candA, candB) {
   const floorA = floorById(scene, candA.floorId);
   const floorB = floorById(scene, candB.floorId);
   const sight = visibilityBetween(scene, floorA, candA.pos, floorB, candB.pos);
+  const exposure = pairExposure(scene, candA, candB);
   const records = [];
   records.push({
     id: `${candA.id}|${candB.id}:spawn-sight`,
@@ -188,38 +193,32 @@ export function pairEvidence(scene, candA, candB) {
     query: { type: 'segment-aabb-LoS', from: sight.eyeA, to: sight.eyeB },
   });
 
-  const primary = candA.routes[0];
-  const exposure = routeExposure(scene, candA, floorB, candB.pos);
   records.push({
-    id: `${candA.id}|${candB.id}:route-exposure`,
+    id: `${candA.id}|${candB.id}:route-exposure:A`,
     source: 'geometry:route-exposure',
     kind: 'route-visibility',
-    value: exposure.fraction,
-    verdict: exposure.fraction >= 0.25 ? 'exposed' : 'covered',
-    detail: `${Math.round(exposure.fraction * 100)}% of sampled route points have eye-line to the opposing spawn`,
-    query: { type: 'route-sample-LoS', samples: exposure.samples, hit: exposure.hits },
+    direction: 'A-route-seen-from-B-spawn',
+    value: exposure.a.fraction,
+    verdict: exposure.a.fraction >= 0.25 ? 'exposed' : 'covered',
+    detail: `${Math.round(exposure.a.fraction * 100)}% of A's route points have eye-line to B's spawn`,
+    query: { type: 'route-sample-LoS', samples: exposure.a.samples, hit: exposure.a.hits },
+  });
+  records.push({
+    id: `${candA.id}|${candB.id}:route-exposure:B`,
+    source: 'geometry:route-exposure',
+    kind: 'route-visibility',
+    direction: 'B-route-seen-from-A-spawn',
+    value: exposure.b.fraction,
+    verdict: exposure.b.fraction >= 0.25 ? 'exposed' : 'covered',
+    detail: `${Math.round(exposure.b.fraction * 100)}% of B's route points have eye-line to A's spawn`,
+    query: { type: 'route-sample-LoS', samples: exposure.b.samples, hit: exposure.b.hits },
   });
 
-  const sightScore = sight.visible ? 0 : 1;          // concealment reward
-  const routeScore = 1 - exposure.fraction;          // covered route reward
-  const conflict = Math.abs(sightScore - routeScore) >= 0.5;
+  const sightScore = sight.visible ? 0 : 1; // concealment reward
+  const routeScore = 1 - (exposure.a.fraction + exposure.b.fraction) / 2; // mean covered route
+  const conflict = exposureConflict(sight.visible, exposure.a.fraction, exposure.b.fraction);
   return { sight, exposure, records, conflict, sightScore, routeScore };
 }
 
-export function routeExposure(scene, cand, opponentFloor, opponentPos) {
-  const route = cand.routes[0];
-  if (!route?.waypoints?.length) return { fraction: 1, samples: 0, hits: 0 };
-  const pts = route.waypoints;
-  const samples = [];
-  const step = Math.max(1, Math.floor(pts.length / 10));
-  for (let i = 0; i < pts.length; i += step) samples.push(pts[i]);
-  let hits = 0;
-  const eyeOpp = [opponentPos[0], opponentFloor.y + scene.agent.eyeHeight, opponentPos[1]];
-  for (const p of samples) {
-    const floor = floorById(scene, cand.floorId);
-    const eye = [p[0], floor.y + scene.agent.eyeHeight, p[1]];
-    const vis = visibilityBetween(scene, floor, p, opponentFloor, opponentPos);
-    if (vis.visible) hits++;
-  }
-  return { fraction: samples.length ? hits / samples.length : 1, samples: samples.length, hits, eyeOpp };
-}
+export { routeExposure };
+

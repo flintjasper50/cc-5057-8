@@ -38,6 +38,7 @@ const api = () => page.evaluate(() => {
     hash: window.__spawnwright.viewport.sceneData ? undefined : undefined,
     mode: s.mode,
     ok: p?.ok ?? null,
+    outcome: p?.outcome ?? null,
     pairCount: p?.pairs?.length ?? 0,
     rejectCount: p?.pairRejections?.length ?? 0,
     pairs: (p?.pairs ?? []).map((x) => ({
@@ -177,6 +178,77 @@ await page.waitForTimeout(300);
 const rejPos = await page.locator('#rejected-panel').innerText();
 check('rejected positions are inspectable', /rejected/i.test(rejPos) && rejPos.length > 40, rejPos.split('\n').slice(0, 4).join(' | '));
 await shot('verify-09-rejected-positions.png');
+
+// ---------------------------------- 4. graphical spawn-zone editing + anomalies
+await page.locator('.scene-btn', { hasText: 'Symmetric Arena' }).click();
+await page.waitForTimeout(700);
+await page.locator('.seg[data-mode="fair"]').click();
+await page.waitForTimeout(200);
+await page.click('#btn-run');
+await page.waitForTimeout(2200);
+a = await api();
+
+const bannerText = () => page.locator('#outcome-banner').innerText();
+check('outcome banner reports success in words', a.ok && /accepted pairs/i.test(await bannerText()), (await bannerText()).split('\n')[0]);
+check('spawn zones are editable from the window', await page.locator('#zone-controls .zone-card').count() === 2, '2 zone cards');
+check('weight help states weights never gate acceptance', /only order pairs/i.test(await page.locator('#weight-help').innerText()), (await page.locator('#weight-help').innerText()).slice(0, 60));
+
+// drive the real number input for spawn-l min-x, then blur to fire `change`
+const zoneInput = (cardIndex, edgeIndex) => page.locator('#zone-controls .zone-card').nth(cardIndex).locator('.zone-field').nth(edgeIndex).locator('input');
+const revBefore = a.revision;
+await zoneInput(0, 0).fill('-20.5');
+await zoneInput(0, 0).blur();
+await page.waitForTimeout(2200);
+a = await api();
+check('editing a spawn zone bumps the revision', a.revision > revBefore, `rev ${revBefore} → ${a.revision}`);
+check('editing a spawn zone revokes stale evidence', a.store.revoked > 0, `${a.store.revoked} revoked`);
+check('editing re-runs the design on live geometry', a.ok && a.pairCount > 0, `${a.pairCount} pairs after edit`);
+
+const encText = await page.locator('#encounter-panel').innerText();
+check('encounter panel is populated from the replay computation', /Candidate region/i.test(encText) && /Actual encounter/i.test(encText), encText.split('\n').slice(0, 4).join(' | '));
+check('encounter panel shows candidate counts per region', /candidates in \d+ samples/i.test(encText), encText.match(/\d+ candidates in \d+ samples/)?.[0]);
+const pairDetailText = await page.locator('#pair-detail').innerText();
+check('pair detail shows both directional exposures', /A route seen/i.test(pairDetailText) && /B route seen/i.test(pairDetailText), pairDetailText.split('\n').filter((l) => /route seen/i.test(l)).join(' | '));
+await shot('verify-10-zone-edit-encounter.png');
+
+// Anomaly A: shrink both spawn zones to the 0.5m minimum -> no-candidates.
+// spawn-l rect min[-19,-6] max[-15,6]; collapse to [-20,-6] .. [-19.5,-5.5].
+await zoneInput(0, 0).fill('-20');    // min-x
+await zoneInput(0, 0).blur();
+await page.waitForTimeout(1400);
+await zoneInput(0, 1).fill('-19.5');  // max-x
+await zoneInput(0, 1).blur();
+await page.waitForTimeout(1400);
+await zoneInput(0, 3).fill('-5.5');   // max-z
+await zoneInput(0, 3).blur();
+await page.waitForTimeout(2200);
+a = await api();
+const noCandBanner = await bannerText();
+check('shrunk zones surface the no-candidate anomaly', a.ok === false && a.outcome === 'no-candidates', `${a.outcome ?? 'ok'}`);
+check('no-candidate banner names geometry as the fix', /no candidate positions/i.test(noCandBanner) && /geometry/i.test(noCandBanner), noCandBanner.split('\n').slice(0, 2).join(' | '));
+await shot('verify-11-no-candidates.png');
+
+// Anomaly B: restore zones, then a chase run whose lead window excludes all
+// pairs must read as constraints-conflict, not no-candidates.
+await page.locator('.scene-btn', { hasText: 'Symmetric Arena' }).click();
+await page.waitForTimeout(700);
+await page.locator('.seg[data-mode="chase"]').click();
+await page.waitForTimeout(200);
+await page.click('#btn-run');
+await page.waitForTimeout(2200);
+a = await api();
+const conflictBanner = await bannerText();
+check('chase over-constrained read as constraints-conflict', a.ok === false && a.outcome === 'constraints-conflict', `${a.outcome ?? 'ok'}`);
+check('constraint banner points at limits, not geometry', /satisfies the hard limits/i.test(conflictBanner) && /limits or the mode/i.test(conflictBanner), conflictBanner.split('\n').slice(0, 2).join(' | '));
+await shot('verify-12-constraints-conflict.png');
+
+await page.click('#btn-help');
+await page.waitForTimeout(250);
+const helpText = await page.locator('#help-modal').innerText();
+check('help lists the graphical spawn-design entry point', /graphical workbench/i.test(helpText), 'graphical workbench');
+check('help marks the command line as auxiliary', /auxiliary/i.test(helpText), 'auxiliary');
+await page.click('#close-help');
+await page.waitForTimeout(200);
 
 check('no console errors during the whole run', errors.length === 0, errors.slice(0, 4).join(' | '));
 

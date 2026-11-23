@@ -9,7 +9,11 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --test \"tests/**/*.test.js\"",
-    "verify": "node scripts/verify.js"
+    "verify": "node scripts/verify.js",
+    "check": "npm run check:contract && npm run check:consistency && npm run check:fixture",
+    "check:contract": "node scripts/contract.mjs",
+    "check:consistency": "node scripts/consistency.mjs",
+    "check:fixture": "node scripts/fixture.mjs"
   },
   "dependencies": {
     "three": "^0.187.0"

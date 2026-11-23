@@ -76,6 +76,7 @@
             </div>
             <div class="weight-block">
               <h3>Soft weights <span class="muted small">(ranking only)</span></h3>
+              <p class="muted small" id="weight-help"></p>
               <div class="field"><label for="wParity">Approach parity <output id="o-wParity"></output></label><input id="wParity" type="range" min="0" max="2" step="0.1" /></div>
               <div class="field"><label for="wConceal">Mutual concealment <output id="o-wConceal"></output></label><input id="wConceal" type="range" min="0" max="2" step="0.1" /></div>
               <div class="field"><label for="wClearance">Clearance <output id="o-wClearance"></output></label><input id="wClearance" type="range" min="0" max="2" step="0.1" /></div>
@@ -83,8 +84,14 @@
             </div>
           </section>
 
+          <section class="panel" id="zone-editor">
+            <h2>4 · Spawn zones</h2>
+            <p class="muted small">Edit a spawn rect and the design re-runs on the live geometry. Changing a zone bumps the revision and revokes stale results.</p>
+            <div id="zone-controls" class="zone-controls"></div>
+          </section>
+
           <section class="panel">
-            <h2>4 · Geometry edits</h2>
+            <h2>5 · Geometry edits</h2>
             <div id="door-controls" class="door-controls"></div>
             <p class="muted small">Flipping a door bumps the scene revision. Results are revoked until you re-run.</p>
           </section>
@@ -119,6 +126,7 @@
         <aside class="rail rail-right">
           <section class="panel">
             <h2>Result</h2>
+            <div id="outcome-banner" class="outcome-banner hidden"></div>
             <div id="run-status" class="run-status">Press <b>Run design</b> to generate candidates.</div>
             <div id="suggestions" class="suggestions"></div>
             <div id="pair-list" class="pair-list"></div>
@@ -126,6 +134,7 @@
           <section class="panel" id="detail-panel">
             <h2>Selected pair</h2>
             <div id="pair-detail" class="pair-detail muted">No pair selected.</div>
+            <div id="encounter-panel" class="encounter-panel hidden"></div>
           </section>
           <section class="panel">
             <h2>Rejected &amp; evidence</h2>
@@ -151,16 +160,25 @@
     <div id="help-modal" class="modal hidden">
       <div class="modal-body">
         <h2>How to start the workbench</h2>
-        <p>From the project root run <code>npm install</code> then <code>npm run dev</code>, and open the printed URL (default <code>http://localhost:5173</code>). Use <code>npm test</code> for the headless kernel checks and <code>npm run verify</code> for the browser-driven verification.</p>
+        <p><b>The spawn design is a graphical workbench.</b> Run <code>npm install</code> then <code>npm run dev</code> and open the printed URL (default <code>http://localhost:5173</code>). Everything below is done in that window.</p>
+        <h3>The screen</h3>
+        <ul>
+          <li><b>Left rail</b> — scene picker, mode, spawn conditions, editable spawn zones, and door flips.</li>
+          <li><b>Centre stage</b> — the 3D level with spawn zones, candidate region, rejected markers, routes, sightlines, and the live replay.</li>
+          <li><b>Right rail</b> — the outcome, accepted pairs, the selected pair's scores and per-record evidence, the actual encounter, rejections, flip counterfactual, and the scene log.</li>
+        </ul>
         <h3>What the window does</h3>
         <ol>
           <li>Pick a scene (symmetric, one-way gate, elevation split).</li>
           <li>Choose Fair opening or Asymmetric chase.</li>
-          <li>Adjust spawn conditions and soft weights. Hard limits are labelled separately.</li>
-          <li>Run design. Candidates appear in the level; the result rail lists pairs, scores, rejections and the raw geometry/nav queries behind each score.</li>
-          <li>Select a pair, then Play replay to dispatch both characters along their real routes.</li>
-          <li>Flip a one-way door and re-run to watch the advantage change sides; stale results are revoked first.</li>
+          <li>Adjust spawn conditions. Hard limits that accept or reject are labelled separately from soft weights, which only rank.</li>
+          <li>Click <b>Run design</b>. Candidates appear in the level; the result rail lists pairs, scores, rejections and the raw geometry/nav queries behind each score.</li>
+          <li>Drag a spawn-zone edge under <b>Spawn zones</b> to adjust the actual spawn conditions, then re-run. The revision bumps and stale results are revoked.</li>
+          <li>Select a pair, then <b>Play</b> to dispatch both characters along their real routes. The <b>Actual encounter</b> panel compares the candidate region with where the two characters really meet.</li>
+          <li>Flip a one-way door and re-run to watch the advantage change sides.</li>
         </ol>
+        <h3>Command line (auxiliary only)</h3>
+        <p>The graphical workbench is the primary entry. <code>npm test</code>, <code>npm run check</code> and <code>npm run verify</code> are maintenance/verification helpers; they do not replace the window.</p>
         <button id="close-help" class="primary">Got it</button>
       </div>
     </div>

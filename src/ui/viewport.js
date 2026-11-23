@@ -333,6 +333,7 @@ export class Viewport {
     // Rejected candidates: small red discs with a ring.
     if (plan.zoneReports) {
       for (const zr of plan.zoneReports) {
+        this.addSpawnRegion(zr);
         for (const cand of zr.candidatesRaw?.rejected ?? []) {
           this.addRejectedMarker(cand);
         }
@@ -340,7 +341,60 @@ export class Viewport {
       }
     }
 
-    for (const pair of plan.pairs) this.addPair(pair);
+    for (const pair of plan.pairs ?? []) this.addPair(pair);
+  }
+
+  // The editable spawn-zone footprint, drawn as a bright quad so the candidate
+  // region is visible even before any candidate passes the limits.
+  addSpawnRegion(zr) {
+    const zone = this.sceneData.zones.find((z) => z.id === zr.zoneId);
+    if (!zone) return;
+    const floor = floorById(this.sceneData, zone.floor);
+    const y = (floor?.y ?? 0) + 0.05;
+    const w = zone.rect.max[0] - zone.rect.min[0];
+    const d = zone.rect.max[1] - zone.rect.min[1];
+    const cx = (zone.rect.min[0] + zone.rect.max[0]) / 2;
+    const cz = (zone.rect.min[1] + zone.rect.max[1]) / 2;
+    const geo = new THREE.PlaneGeometry(w, d);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.08, side: THREE.DoubleSide, depthWrite: false });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(cx, y, cz);
+    mesh.userData.regionZoneId = zone.id;
+    this.overlay.add(mesh);
+  }
+
+  // Draw where the two characters actually are when they first see each other
+  // (or at the end of the replay if they never do). Coordinates come from the
+  // replay's own sample records, not from the plan.
+  showEncounter(replay) {
+    if (!replay) return;
+    const marker = replay.firstVisibility;
+    const at = marker ? marker.t : Math.max(
+      replay.sides.A?.path?.at(-1)?.t ?? 0,
+      replay.sides.B?.path?.at(-1)?.t ?? 0,
+    );
+    const pA = sampleAtPath(replay.sides.A?.path, at);
+    const pB = sampleAtPath(replay.sides.B?.path, at);
+    if (!pA || !pB) return;
+    const A = new THREE.Vector3(pA.pos2[0], pA.y + 0.9, pA.pos2[1]);
+    const B = new THREE.Vector3(pB.pos2[0], pB.y + 0.9, pB.pos2[1]);
+    const visible = !!marker;
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([A, B]),
+      new THREE.LineBasicMaterial({ color: visible ? 0x7ee787 : 0xff7b72, transparent: true, opacity: 0.85 }),
+    );
+    line.userData.kind = 'encounter';
+    this.overlay.add(line);
+    for (const P of [A, B]) {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.5, 0.62, 28),
+        new THREE.MeshBasicMaterial({ color: visible ? 0x7ee787 : 0xff7b72, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      ring.position.copy(P);
+      ring.userData.kind = 'encounter';
+      this.overlay.add(ring);
+    }
   }
 
   addCandidateMarker(cand) {
@@ -530,8 +584,16 @@ export class Viewport {
   }
 }
 
-function applySample(avatar, path, t) {
-  if (!path?.length) { avatar.visible = false; return; }
+function sampleAtPath(path, t) {
+  if (!path?.length) return null;
+  if (t <= path[0].t) return path[0];
+  for (let i = 1; i < path.length; i++) {
+    if (path[i].t >= t) return path[i];
+  }
+  return path[path.length - 1];
+}
+
+function applySample(avatar, path, t) {  if (!path?.length) { avatar.visible = false; return; }
   avatar.visible = true;
   let a = path[0], b = path[0];
   for (let i = 1; i < path.length; i++) {

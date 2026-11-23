@@ -425,6 +425,26 @@ export function moveSolid(scene, solidId, delta) {
   return next;
 }
 
+// Adjust one edge of a zone's rect. Spawn-zone extents are spawn conditions, so
+// editing them bumps the revision exactly like a door flip.
+//   edge: 'min-x' | 'max-x' | 'min-z' | 'max-z'
+export function resizeZone(scene, zoneId, edge, value) {
+  const next = cloneScene(scene);
+  const z = next.zones.find((x) => x.id === zoneId);
+  if (!z) throw new Error(`No zone "${zoneId}"`);
+  const r = z.rect;
+  const v = Number(value);
+  if (!Number.isFinite(v)) throw new Error(`Invalid rect value for "${zoneId}"`);
+  const EPSMIN = 0.5;
+  if (edge === 'min-x') r.min[0] = Math.min(v, r.max[0] - EPSMIN);
+  else if (edge === 'max-x') r.max[0] = Math.max(v, r.min[0] + EPSMIN);
+  else if (edge === 'min-z') r.min[1] = Math.min(v, r.max[1] - EPSMIN);
+  else if (edge === 'max-z') r.max[1] = Math.max(v, r.min[1] + EPSMIN);
+  else throw new Error(`Unknown zone edge "${edge}"`);
+  next.revision = scene.revision + 1;
+  return next;
+}
+
 export function distancePointToSolid2D(p, solid) {
   const fp = footprintOf(solid);
   const q = nearestPointInRect(p, fp);
